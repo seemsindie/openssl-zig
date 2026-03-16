@@ -334,3 +334,4 @@ compile_commands.json
 
 # Zig build
 *zig-*/
+zig-pkg/

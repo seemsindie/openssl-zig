@@ -24,6 +24,7 @@ fn libcrypto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     lib.pie = true;
@@ -898,7 +899,6 @@ fn libcrypto(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .flags = cflags,
     });
     lib.root_module.linkLibrary(try libprovider(b, target, optimize, android_api_level));
-    lib.linkLibC();
     return lib;
 }
 
@@ -908,6 +908,7 @@ fn libssl(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
     lib.pie = true;
@@ -1018,7 +1019,6 @@ fn libssl(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         },
         .flags = cflags,
     });
-    lib.linkLibC();
     return lib;
 }
 
@@ -1028,6 +1028,7 @@ fn libprovider(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
         }),
     });
 
@@ -1274,7 +1275,6 @@ fn libprovider(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         },
         .flags = cflags,
     });
-    lib.linkLibC();
     return lib;
 }
 
@@ -1312,118 +1312,9 @@ const AndroidConfigError = error{
     OutOfMemory,
 };
 
-fn ConfigureAndroidEnvironment(b: *std.Build, compile: *std.Build.Step.Compile, target: std.Build.ResolvedTarget, api_level: []const u8) AndroidConfigError!void {
-    const api_level_int = std.fmt.parseInt(u32, api_level, 10) catch {
-        std.log.err("Invalid API level format: '{s}', expected numeric string (e.g., '21')", .{api_level});
-        return AndroidConfigError.InvalidApiLevel;
-    };
-
-    const cpu_arch = target.result.cpu.arch;
-
-    if (cpu_arch == .riscv64) {
-        if (api_level_int < 35) {
-            std.log.err("RISC-V 64 Android target requires API level 35 or higher (requested: {d}).", .{api_level_int});
-            return AndroidConfigError.InvalidApiLevel;
-        }
-    }
-
-    if (api_level_int < 24) {
-        std.log.warn("API level {d} is very low, modern NDKs may not support it.", .{api_level_int});
-    }
-
-    const NDK_ENV_VAR = "ANDROID_NDK_HOME";
-
-    const ndk_home = std.process.getEnvVarOwned(b.allocator, NDK_ENV_VAR) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            std.log.err("Environment variable '{s}' not found", .{NDK_ENV_VAR});
-            return AndroidConfigError.MissingNdkEnvironment;
-        },
-        error.InvalidWtf8 => {
-            std.log.err("Environment variable '{s}' contains invalid UTF-8 encoding", .{NDK_ENV_VAR});
-            return AndroidConfigError.InvalidNdkPathEncoding;
-        },
-        error.OutOfMemory => return AndroidConfigError.OutOfMemory,
-    };
-    defer b.allocator.free(ndk_home);
-
-    std.fs.accessAbsolute(ndk_home, .{}) catch {
-        std.log.err("NDK path not accessible: {s}", .{ndk_home});
-        return AndroidConfigError.NdkPathNotFound;
-    };
-
-    const host_os = builtin.os.tag;
-    const host_arch = builtin.cpu.arch;
-    const os_name = switch (host_os) {
-        .windows => "windows",
-        .linux => "linux",
-        .macos => "darwin",
-        else => {
-            std.log.err("Unsupported host OS: {s}", .{@tagName(host_os)});
-            return AndroidConfigError.UnsupportedHostOperatingSystem;
-        },
-    };
-    const arch_name = switch (host_arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "aarch64",
-        .x86 => "x86",
-        else => {
-            std.log.err("Unsupported host arch: {s}", .{@tagName(host_arch)});
-            return AndroidConfigError.UnsupportedHostArchitecture;
-        },
-    };
-    const host_tag = std.fmt.allocPrint(b.allocator, "{s}-{s}", .{ os_name, arch_name }) catch {
-        return AndroidConfigError.OutOfMemory;
-    };
-    defer b.allocator.free(host_tag);
-
-    const target_arch = switch (cpu_arch) {
-        .aarch64 => "aarch64-linux-android",
-        .x86_64 => "x86_64-linux-android",
-        .arm, .thumb => "arm-linux-androideabi",
-        .x86 => "i686-linux-android",
-        .riscv64 => "riscv64-linux-android",
-        else => {
-            std.log.err("Unsupported target arch: {s}", .{@tagName(cpu_arch)});
-            return AndroidConfigError.UnsupportedTargetArchitecture;
-        },
-    };
-
-    const sysroot_path = std.fs.path.join(b.allocator, &.{ ndk_home, "toolchains", "llvm", "prebuilt", host_tag, "sysroot" }) catch return AndroidConfigError.OutOfMemory;
-    defer b.allocator.free(sysroot_path);
-
-    std.fs.accessAbsolute(sysroot_path, .{}) catch {
-        std.log.err("Sysroot not found at: {s}", .{sysroot_path});
-        std.log.err("Check if your NDK version matches the expected directory structure.", .{});
-        return AndroidConfigError.SysrootNotFound;
-    };
-
-    const include_path = std.fs.path.join(b.allocator, &.{ sysroot_path, "usr", "include" }) catch return AndroidConfigError.OutOfMemory;
-    defer b.allocator.free(include_path);
-
-    const lib_path = std.fs.path.join(b.allocator, &.{ sysroot_path, "usr", "lib", target_arch, api_level }) catch return AndroidConfigError.OutOfMemory;
-    defer b.allocator.free(lib_path);
-
-    const system_include_path = std.fs.path.join(b.allocator, &.{ sysroot_path, "usr", "include", target_arch }) catch return AndroidConfigError.OutOfMemory;
-    defer b.allocator.free(system_include_path);
-
-    compile.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
-    compile.root_module.addSystemIncludePath(.{ .cwd_relative = system_include_path });
-
-    compile.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
-
-    var writer = std.Io.Writer.Allocating.init(b.allocator);
-
-    const libc_installation = std.zig.LibCInstallation{
-        .include_dir = include_path,
-        .sys_include_dir = system_include_path,
-        .crt_dir = lib_path,
-    };
-
-    libc_installation.render(&writer.writer) catch {
-        std.log.err("Failed to render libc installation configuration.", .{});
-        return AndroidConfigError.LibCRenderFailed;
-    };
-    const libc_path = b.addWriteFiles().add("android-libc.conf", writer.written());
-
-    compile.setLibCFile(libc_path);
+fn ConfigureAndroidEnvironment(_: *std.Build, _: *std.Build.Step.Compile, _: std.Build.ResolvedTarget, _: []const u8) AndroidConfigError!void {
+    // Android NDK configuration is not yet ported to Zig 0.16.0-dev.
+    // Several std.fs and std.process APIs changed in this version.
+    std.log.err("Android target support requires porting ConfigureAndroidEnvironment to Zig 0.16 APIs", .{});
+    return AndroidConfigError.MissingNdkEnvironment;
 }
