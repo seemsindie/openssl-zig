@@ -5,6 +5,7 @@
     .fingerprint = 0x773a47f1ef0097c1,
     .paths = .{
         "build.zig",
+        "build.zig.zon",
         "crypto",
         "include_gen",
         "include",
